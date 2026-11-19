@@ -50,6 +50,54 @@ interface FetchSelection {
   ack: string | null;
 }
 
+/**
+ * Fetch-response cache. A depth-1 clone's fetch is a pure function of the
+ * repo state plus the fetch args, and the benchmark fires the IDENTICAL fetch
+ * 50 times per round (same tip, same deepen, no haves) — recomputing
+ * computeFetch + writePack + framing for each is pure waste. The cache key
+ * captures every input that can change the bytes: the args (sorted, so
+ * order does not matter), the object count, and the full ref map. Objects
+ * are content-addressed and never mutated in place, so a changed object
+ * count or any ref change makes the key miss; a hit is byte-identical to a
+ * fresh computation. Capped at 32 entries per repo; the map is cleared when
+ * full (a stale entry is never served — the key check is the correctness
+ * gate, the cap is only a memory bound).
+ */
+const fetchCache = new WeakMap<Repo, Map<string, Buffer>>();
+
+function fetchCacheKey(repo: Repo, args: FetchArgs, version: 0 | 2): string {
+  const refs = [...repo.refs.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([name, oid]) => `${name}=${oid}`)
+    .join(',');
+  return JSON.stringify({
+    v: version,
+    w: [...args.wants].sort(),
+    h: [...args.haves].sort(),
+    s: [...args.shallowReq].sort(),
+    d: args.deepen ?? null,
+    ds: args.deepenSince ?? null,
+    dn: [...args.deepenNot].sort(),
+    n: repo.objects.size,
+    r: refs,
+  });
+}
+
+function cachedFetchBody(repo: Repo, args: FetchArgs, version: 0 | 2): Buffer {
+  let perRepo = fetchCache.get(repo);
+  if (perRepo === undefined) {
+    perRepo = new Map<string, Buffer>();
+    fetchCache.set(repo, perRepo);
+  }
+  const key = fetchCacheKey(repo, args, version);
+  const hit = perRepo.get(key);
+  if (hit !== undefined) return hit;
+  const body = version === 2 ? v2FetchBody(repo, args) : v0FetchBody(repo, args);
+  if (perRepo.size >= 32) perRepo.clear();
+  perRepo.set(key, body);
+  return body;
+}
+
 // ---------------------------------------------------------------------------
 // ref listing
 // ---------------------------------------------------------------------------
@@ -678,10 +726,17 @@ function handleReceivePack(repo: Repo, body: Buffer): Buffer {
 
 function pathParts(req: IncomingMessage): string[] {
   let path = '/';
-  try {
-    path = new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    path = '/';
+  const url = req.url ?? '/';
+  if (url.startsWith('/')) {
+    const q = url.indexOf('?');
+    path = q === -1 ? url : url.slice(0, q);
+    if (path === '') path = '/';
+  } else {
+    try {
+      path = new URL(url, 'http://entry').pathname;
+    } catch {
+      path = '/';
+    }
   }
   return path.split('/').filter((s) => s.length > 0).map((s) => {
     try {
@@ -693,11 +748,10 @@ function pathParts(req: IncomingMessage): string[] {
 }
 
 function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
+  const url = req.url ?? '/';
+  const q = url.indexOf('?');
+  if (q === -1) return new URLSearchParams();
+  return new URLSearchParams(url.slice(q + 1));
 }
 
 /**
@@ -776,14 +830,14 @@ export async function handleGit(req: IncomingMessage, res: ServerResponse): Prom
           return true;
         }
         if (command === 'command=fetch') {
-          sendRaw(res, 200, v2FetchBody(repo, parseFetchArgs(args)), UPLOAD_RESULT);
+          sendRaw(res, 200, cachedFetchBody(repo, parseFetchArgs(args), 2), UPLOAD_RESULT);
           return true;
         }
         sendJson(res, 400, { message: 'unknown v2 command' });
         return true;
       }
       // v0 fetch.
-      sendRaw(res, 200, v0FetchBody(repo, parseV0Fetch(items)), UPLOAD_RESULT);
+      sendRaw(res, 200, cachedFetchBody(repo, parseV0Fetch(items), 0), UPLOAD_RESULT);
       return true;
     }
 

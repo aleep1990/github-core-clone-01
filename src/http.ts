@@ -100,13 +100,23 @@ export function parseJsonBody(buf: Buffer): unknown {
   return JSON.parse(buf.toString('utf8'));
 }
 
-/** Split a URL path into segments, decoding each one. */
+/** Split a URL path into segments, decoding each one. Fast path: the
+ * request-target is a path (origin form), so a string split replaces the
+ * `new URL()` construction the hot paths used to pay for on every request.
+ * An absolute-form target still falls back to URL parsing. */
 export function pathSegments(req: IncomingMessage): string[] {
   let path = '/';
-  try {
-    path = new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    path = '/';
+  const url = req.url ?? '/';
+  if (url.startsWith('/')) {
+    const q = url.indexOf('?');
+    path = q === -1 ? url : url.slice(0, q);
+    if (path === '') path = '/';
+  } else {
+    try {
+      path = new URL(url, 'http://entry').pathname;
+    } catch {
+      path = '/';
+    }
   }
   return path.split('/').filter((s) => s.length > 0).map((s) => {
     try {
@@ -118,9 +128,8 @@ export function pathSegments(req: IncomingMessage): string[] {
 }
 
 export function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
+  const url = req.url ?? '/';
+  const q = url.indexOf('?');
+  if (q === -1) return new URLSearchParams();
+  return new URLSearchParams(url.slice(q + 1));
 }

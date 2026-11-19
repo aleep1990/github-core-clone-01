@@ -471,8 +471,14 @@ function handleRpc(req: IncomingMessage, payload: unknown): Record<string, unkno
 }
 
 function pathOf(req: IncomingMessage): string {
+  const url = req.url ?? '/';
+  if (url.startsWith('/')) {
+    const q = url.indexOf('?');
+    const path = q === -1 ? url : url.slice(0, q);
+    return path === '' ? '/' : path;
+  }
   try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
+    return new URL(url, 'http://entry').pathname;
   } catch {
     return '/';
   }
