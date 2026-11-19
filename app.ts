@@ -11,10 +11,17 @@ import { handleRest } from './src/rest.ts';
 import { handleGraphql } from './src/graphql.ts';
 import { handleMcp } from './src/mcp.ts';
 
-/** The path of a request URL, or '/' when it does not parse (never a throw). */
+/** The path of a request URL, or '/' when it does not parse (never a throw).
+ * Fast path: origin-form targets are split on '?' instead of `new URL()`. */
 function pathOf(req: IncomingMessage): string {
+  const url = req.url ?? '/';
+  if (url.startsWith('/')) {
+    const q = url.indexOf('?');
+    const path = q === -1 ? url : url.slice(0, q);
+    return path === '' ? '/' : path;
+  }
   try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
+    return new URL(url, 'http://entry').pathname;
   } catch {
     return '/';
   }
