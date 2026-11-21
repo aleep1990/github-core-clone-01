@@ -547,15 +547,17 @@ function splitPushBody(body: Buffer): { commands: PushCommand[]; sideband: boole
   if (commandLines.length === 0) return null;
   let sideband = false;
   const commands: PushCommand[] = [];
-  commandLines.forEach((raw, index) => {
+  commandLines.forEach((raw) => {
     let line = raw.replace(/\n$/, '');
-    if (index === 0) {
-      const nul = line.indexOf('\0');
-      if (nul >= 0) {
-        const caps = line.slice(nul + 1).split(' ');
-        sideband = caps.includes('side-band-64k');
-        line = line.slice(0, nul);
-      }
+    // The capabilities ride on the first COMMAND line after a NUL — but a
+    // push from a shallow clone puts `shallow <oid>` lines first, so the
+    // command is not at index 0. Strip the NUL + capabilities from
+    // whichever line carries them (only the command line ever does).
+    const nul = line.indexOf('\0');
+    if (nul >= 0) {
+      const caps = line.slice(nul + 1).split(' ');
+      sideband = caps.includes('side-band-64k');
+      line = line.slice(0, nul);
     }
     const parts = line.split(' ');
     if (parts.length >= 3) {
